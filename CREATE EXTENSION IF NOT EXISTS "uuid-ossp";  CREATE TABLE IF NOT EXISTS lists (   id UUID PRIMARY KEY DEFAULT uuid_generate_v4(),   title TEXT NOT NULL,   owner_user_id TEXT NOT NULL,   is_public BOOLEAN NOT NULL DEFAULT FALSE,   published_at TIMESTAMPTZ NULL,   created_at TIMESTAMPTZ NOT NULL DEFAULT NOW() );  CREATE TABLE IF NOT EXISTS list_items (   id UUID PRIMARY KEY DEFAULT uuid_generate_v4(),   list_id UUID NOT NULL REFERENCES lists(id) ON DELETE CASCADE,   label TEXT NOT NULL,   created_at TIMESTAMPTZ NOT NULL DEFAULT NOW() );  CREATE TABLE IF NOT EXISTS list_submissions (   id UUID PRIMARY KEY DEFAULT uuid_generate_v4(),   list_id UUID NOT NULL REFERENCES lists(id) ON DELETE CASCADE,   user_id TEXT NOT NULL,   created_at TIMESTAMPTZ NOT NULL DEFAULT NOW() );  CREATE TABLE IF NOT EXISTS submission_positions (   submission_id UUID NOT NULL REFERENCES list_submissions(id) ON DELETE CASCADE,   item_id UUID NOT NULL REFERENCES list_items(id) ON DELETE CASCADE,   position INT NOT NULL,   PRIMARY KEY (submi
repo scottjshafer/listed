@@ -1,0 +1,45 @@
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE IF NOT EXISTS lists (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  title TEXT NOT NULL,
+  owner_user_id TEXT NOT NULL,
+  is_public BOOLEAN NOT NULL DEFAULT FALSE,
+  published_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS list_items (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  list_id UUID NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS list_submissions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  list_id UUID NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS submission_positions (
+  submission_id UUID NOT NULL REFERENCES list_submissions(id) ON DELETE CASCADE,
+  item_id UUID NOT NULL REFERENCES list_items(id) ON DELETE CASCADE,
+  position INT NOT NULL,
+  PRIMARY KEY (submission_id, item_id)
+);
+
+-- Aggregate score table (fast reads)
+CREATE TABLE IF NOT EXISTS item_scores (
+  list_id UUID NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+  item_id UUID NOT NULL REFERENCES list_items(id) ON DELETE CASCADE,
+  points_total BIGINT NOT NULL DEFAULT 0,
+  submissions_count BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (list_id, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_list_items_list_id ON list_items(list_id);
+CREATE INDEX IF NOT EXISTS idx_submissions_list_id ON list_submissions(list_id);
+CREATE INDEX IF NOT EXISTS idx_item_scores_list_id ON item_scores(list_id);

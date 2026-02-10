@@ -1,0 +1,25 @@
+export type RankedItem = {
+  itemId: string;
+  position: number; // 1..N
+};
+
+export function bordaPoints(position: number, total: number): number {
+  // Position 1 gets N points, position N gets 1 point.
+  // You can change the scoring curve later without changing DB schema.
+  if (position < 1 || position > total) return 0;
+  return total - position + 1;
+}
+
+export function computePointsForRanking(itemsInOrder: string[]): Map<string, number> {
+  const total = itemsInOrder.length;
+  const points = new Map<string, number>();
+
+  for (let idx = 0; idx < total; idx++) {
+    const itemId = itemsInOrder[idx];
+    const position = idx + 1;
+    const p = bordaPoints(position, total);
+    points.set(itemId, (points.get(itemId) ?? 0) + p);
+  }
+
+  return points;
+}

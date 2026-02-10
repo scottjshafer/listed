@@ -1,0 +1,180 @@
+import { Router } from "express";
+import { z } from "zod";
+import { query } from "../db.js";
+import { computePointsForRanking } from "../services/ranking.js";
+
+export const listsRouter = Router();
+
+/**
+ * DB expectations:
+ * - lists(id, title, owner_user_id, is_public, published_at)
+ * - list_items(id, list_id, label, created_at)
+ * - list_submissions(id, list_id, user_id, created_at)
+ * - submission_positions(submission_id, item_id, position)
+ * - item_scores(list_id, item_id, points_total, submissions_count, updated_at)
+ */
+
+// Create a list (private by default)
+listsRouter.post("/", async (req, res) => {
+  const bodySchema = z.object({
+    title: z.string().min(2).max(120),
+    ownerUserId: z.string().min(1),
+    isPublic: z.boolean().optional().default(false),
+    items: z.array(z.object({ label: z.string().min(1).max(120) })).min(2).max(200)
+  });
+
+  const body = bodySchema.parse(req.body);
+
+  const [list] = await query<{ id: string }>(
+    `INSERT INTO lists (title, owner_user_id, is_public)
+     VALUES ($1, $2, $3)
+     RETURNING id`,
+    [body.title, body.ownerUserId, body.isPublic]
+  );
+
+  // insert items
+  for (const item of body.items) {
+    await query(
+      `INSERT INTO list_items (list_id, label) VALUES ($1, $2)`,
+      [list.id, item.label]
+    );
+  }
+
+  // initialize item_scores rows
+  await query(
+    `INSERT INTO item_scores (list_id, item_id, points_total, submissions_count)
+     SELECT li.list_id, li.id, 0, 0
+     FROM list_items li
+     WHERE li.list_id = $1`,
+    [list.id]
+  );
+
+  res.status(201).json({ listId: list.id });
+});
+
+// Publish (locks in for sharing)
+listsRouter.post("/:listId/publish", async (req, res) => {
+  const paramsSchema = z.object({ listId: z.string().min(1) });
+  const { listId } = paramsSchema.parse(req.params);
+
+  await query(
+    `UPDATE lists SET published_at = NOW() WHERE id = $1`,
+    [listId]
+  );
+
+  res.json({ ok: true, listId });
+});
+
+// Get list + items (for rendering)
+listsRouter.get("/:listId", async (req, res) => {
+  const paramsSchema = z.object({ listId: z.string().min(1) });
+  const { listId } = paramsSchema.parse(req.params);
+
+  const [list] = await query<any>(
+    `SELECT id, title, owner_user_id, is_public, published_at
+     FROM lists
+     WHERE id = $1`,
+    [listId]
+  );
+
+  if (!list) return res.status(404).json({ error: "List not found" });
+
+  const items = await query<any>(
+    `SELECT id, label
+     FROM list_items
+     WHERE list_id = $1
+     ORDER BY created_at ASC`,
+    [listId]
+  );
+
+  res.json({ list, items });
+});
+
+// Submit a user's reordered ranking
+listsRouter.post("/:listId/submissions", async (req, res) => {
+  const paramsSchema = z.object({ listId: z.string().min(1) });
+  const bodySchema = z.object({
+    userId: z.string().min(1),
+    // array of itemIds in the user's desired order, top first
+    orderedItemIds: z.array(z.string().min(1)).min(2).max(200)
+  });
+
+  const { listId } = paramsSchema.parse(req.params);
+  const body = bodySchema.parse(req.body);
+
+  // Ensure list exists + published
+  const [list] = await query<any>(
+    `SELECT id, published_at FROM lists WHERE id = $1`,
+    [listId]
+  );
+  if (!list) return res.status(404).json({ error: "List not found" });
+  if (!list.published_at) return res.status(400).json({ error: "List is not published yet" });
+
+  // Ensure items match the list (basic integrity)
+  const dbItems = await query<{ id: string }>(
+    `SELECT id FROM list_items WHERE list_id = $1`,
+    [listId]
+  );
+  const dbItemSet = new Set(dbItems.map(i => i.id));
+
+  for (const itemId of body.orderedItemIds) {
+    if (!dbItemSet.has(itemId)) {
+      return res.status(400).json({ error: `Item does not belong to list: ${itemId}` });
+    }
+  }
+
+  // Create submission
+  const [submission] = await query<{ id: string }>(
+    `INSERT INTO list_submissions (list_id, user_id)
+     VALUES ($1, $2)
+     RETURNING id`,
+    [listId, body.userId]
+  );
+
+  // Store positions
+  for (let idx = 0; idx < body.orderedItemIds.length; idx++) {
+    await query(
+      `INSERT INTO submission_positions (submission_id, item_id, position)
+       VALUES ($1, $2, $3)`,
+      [submission.id, body.orderedItemIds[idx], idx + 1]
+    );
+  }
+
+  // Update aggregate scores
+  const pointsMap = computePointsForRanking(body.orderedItemIds);
+
+  // We increment both points_total and submissions_count for each included item
+  for (const [itemId, points] of pointsMap.entries()) {
+    await query(
+      `UPDATE item_scores
+       SET points_total = points_total + $3,
+           submissions_count = submissions_count + 1,
+           updated_at = NOW()
+       WHERE list_id = $1 AND item_id = $2`,
+      [listId, itemId, points]
+    );
+  }
+
+  res.status(201).json({ ok: true, submissionId: submission.id });
+});
+
+// Get aggregate ranking results
+listsRouter.get("/:listId/rankings", async (req, res) => {
+  const paramsSchema = z.object({ listId: z.string().min(1) });
+  const { listId } = paramsSchema.parse(req.params);
+
+  const rows = await query<any>(
+    `SELECT
+        li.id AS item_id,
+        li.label,
+        s.points_total,
+        s.submissions_count
+     FROM item_scores s
+     JOIN list_items li ON li.id = s.item_id
+     WHERE s.list_id = $1
+     ORDER BY s.points_total DESC, s.submissions_count DESC, li.label ASC`,
+    [listId]
+  );
+
+  res.json({ listId, rankings: rows });
+});

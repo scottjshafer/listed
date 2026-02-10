@@ -1,0 +1,11 @@
+{
+  "title": "Best Fast Food Fries",
+  "ownerUserId": "user_123",
+  "isPublic": true,
+  "items": [
+    {"label":"McDonald's"},
+    {"label":"Wendy's"},
+    {"label":"Chick-fil-A"},
+    {"label":"Five Guys"}
+  ]
+}
